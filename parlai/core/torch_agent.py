@@ -250,6 +250,45 @@ class TorchAgent(Agent):
 
         return obs
 
+    def _padded_tensor(self, items):
+        """Create a right-padded matrix from an uneven list of lists.
+
+        :param list[list[int]] items: List of items
+        :param bool sort: If True, orders by the length
+        :rtype: (Tensor[int64], list[int])
+        :return: (padded, lengths)
+        """
+        n = len(items)
+        lens = [len(item) for item in items]
+        t = max(lens)
+        output = torch.LongTensor(n, t).fill_(self.NULL_IDX)
+        for i in range(len(items)):
+            output[i, :lens[i]] = items[i]
+        if self.use_cuda:
+            output = output.cuda()
+        return output, lens
+
+    def _argsort(self, keys, *lists, descending=False):
+        """Reorder each list in lists by the (descending) sorted order of keys.
+
+        :param iter keys: sort indices
+        :param list[list] lists: lists to reordered by keys's order
+        :param bool descending: Use descending order if true
+        :return list[list]]: The reordered items
+        """
+        ind_sorted = sorted(range(len(keys)), key=lambda k: keys[k])
+        if descending:
+            ind_sorted = list(reversed(ind_sorted))
+        output = []
+        for l in lists:
+            if isinstance(l, set):
+                l = list(l)
+            if isinstance(l, torch.Tensor):
+                output.append(l[ind_sorted])
+            else:
+                output.append([l[i] for i in ind_sorted])
+        return output
+
     def batchify(self, obs_batch, sort=False,
                  is_valid=lambda obs: 'text_vec' in obs or 'image' in obs):
         """Create a batch of valid observations from an unchecked batch.
@@ -293,23 +332,14 @@ class TorchAgent(Agent):
         # TEXT
         xs, x_lens = None, None
         if any('text_vec' in ex for ex in exs):
-            x_text = [ex['text_vec'] for ex in exs]
-            x_lens = [ex.shape[0] for ex in x_text]
-
+            xs, x_lens = self._padded_tensor([ex['text_vec'] for ex in exs])
             if sort:
                 sort = False  # now we won't sort on labels
-                ind_sorted = sorted(range(len(x_lens)),
-                                    key=lambda k: -x_lens[k])
-                exs = [exs[k] for k in ind_sorted]
-                valid_inds = [valid_inds[k] for k in ind_sorted]
-                x_text = [x_text[k] for k in ind_sorted]
-                x_lens = [x_lens[k] for k in ind_sorted]
-
-            xs = torch.LongTensor(len(exs), max(x_lens)).fill_(self.NULL_IDX)
+                xs, x_lens, valid_inds, exs = self._argsort(
+                    x_lens, xs, x_lens, valid_inds, exs, descending=True
+                )
             if self.use_cuda:
                 xs = xs.cuda()
-            for i, ex in enumerate(x_text):
-                xs[i, :ex.shape[0]] = ex
 
         # LABELS
         eval_labels_avail = any('eval_labels_vec' in ex for ex in exs)
@@ -325,14 +355,11 @@ class TorchAgent(Agent):
             y_lens = [y.shape[0] for y in label_vecs]
 
             if sort and xs is None:
-                # always sort on xs if we have them, not ys
-                ind_sorted = sorted(range(len(y_lens)),
-                                    key=lambda k: -y_lens[k])
-                exs = [exs[k] for k in ind_sorted]
-                valid_inds = [valid_inds[k] for k in ind_sorted]
-                label_vecs = [label_vecs[k] for k in ind_sorted]
-                labels = [labels[k] for k in ind_sorted]
-                y_lens = [y_lens[k] for k in ind_sorted]
+                ys, y_lens = self._padded_tensor(labels)
+                exs, valid_inds, label_vecs, labels, y_lens = self._argsort(
+                    y_lens, exs, valid_inds, label_vecs, labels, y_lens,
+                    descending=True
+                )
 
             ys = torch.LongTensor(len(exs), max(y_lens)).fill_(self.NULL_IDX)
             if self.use_cuda:
